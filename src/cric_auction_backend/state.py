@@ -1,8 +1,13 @@
+import threading
+
 from .models import BidHistory, Team
 
 
 class AppState:
     def __init__(self):
+        # Mutex lock to guard state modifications across AnyIO worker threads
+        self.lock = threading.RLock()
+
         # Teams indexed by team ID (e.g. "t1", "t2")
         self.teams: dict[str, Team] = {}
 
@@ -15,7 +20,7 @@ class AppState:
         # Auction configuration
         self.image_path: str = ""
         self.base_purse: float = 0
-        self.captain_ids: list[int] = []
+        self.captain_ids: list[str] = []
         self.captain_names: list[str] = []
 
 
