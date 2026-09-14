@@ -20,8 +20,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://thepavansai.github.io",
+        "https://pavansai.is-a.dev",
     ],
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$|^https://.*\.pages\.dev$|^https://.*\.workers\.dev$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
