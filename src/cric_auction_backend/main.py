@@ -173,7 +173,7 @@ def get_image(filename:str):
     safe_base = os.path.abspath(state.image_path)
     target_path = os.path.abspath(os.path.join(safe_base,filename))
 
-    if not target_path.startswith(safe_base) or ".." in filename:
+    if os.path.commonpath([safe_base, target_path]) != safe_base or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid path")
 
     if not os.path.isfile(target_path):
