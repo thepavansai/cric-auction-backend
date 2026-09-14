@@ -2,7 +2,7 @@
 
 A high-performance, thread-safe FastAPI backend for real-time IPL-style cricket auctions, migrated from Go to Python.
 
-Designed to work seamlessly with the [IG-Cricket-Auction](https://github.com/thepavansai/IG-Cricket-Auction) React frontend.
+Designed to work seamlessly with the [cric-auction-frontend](https://github.com/thepavansai/cric-auction-frontend) React frontend.
 
 ---
 
@@ -12,7 +12,7 @@ Designed to work seamlessly with the [IG-Cricket-Auction](https://github.com/the
 - **Bidding Engine (`/api/bid`):** Real-time bidding with team budget deduction, duplicate-sale protection, and force-sell overrides (`ignore_budget`).
 - **Undo / Reverse Bid (`/api/reverse-bid`):** Roll back bids in LIFO order, automatically refunding the team's purse and returning the player to unsold status.
 - **Dynamic Image Serving (`/images/{filename}`):** Streams player photos dynamically from the user-configured image path, secured against path traversal attacks.
-- **Normalized Alphanumeric Player IDs:** Accepts standard string player IDs (e.g. `IG0227`, `P101`, `EMP-42`).
+- **Normalized Alphanumeric Player IDs:** Accepts standard string player IDs (e.g. `P101`, `EMP-42`, `C01`).
 - **Thread-Safe State:** Synchronized using `threading.RLock` to prevent race conditions across concurrent AnyIO worker threads.
 - **Flexible CORS:** Supports any localhost port (`3000`, `5173`, `5174`, etc.) and production GitHub Pages deployments out-of-the-box.
 

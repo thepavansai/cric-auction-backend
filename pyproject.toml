@@ -1,14 +1,22 @@
 [project]
 name = "cric-auction-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "High-performance, thread-safe FastAPI backend for real-time cricket player auctions"
 readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Pavan Sai" }
+]
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.141.1",
     "pydantic>=2.13.4",
     "uvicorn[standard]>=0.52.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/thepavansai/cric-auction-backend"
+Repository = "https://github.com/thepavansai/cric-auction-backend"
 
 [project.scripts]
 cric-auction-backend = "cric_auction_backend:main"
