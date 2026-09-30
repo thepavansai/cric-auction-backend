@@ -106,7 +106,8 @@ def place_bid(request: BidRequest):
                 detail="Insufficient budget",
             )
 
-        team.budget -= request.bid_amount
+        # Re-round: repeated float arithmetic drifts (e.g. 100 - 2.1 - 2.2)
+        team.budget = round(team.budget - request.bid_amount, 1)
         team.roster.append(request.player_id)
 
         state.bid_history.append(
@@ -147,7 +148,7 @@ def reverse_bid():
                 detail="Invalid bid reversal",
             )
 
-        team.budget += last_bid.bid_amount
+        team.budget = round(team.budget + last_bid.bid_amount, 1)
 
         # Remove player from roster (pop last if matches, else linear remove)
         if team.roster and team.roster[-1] == last_bid.player_id:
