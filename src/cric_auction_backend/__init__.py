@@ -7,7 +7,7 @@ def main() -> None:
   # Allows overriding via environment variables, defaulting to 0.0.0.0:8080
   host = os.getenv("HOST", "0.0.0.0")
   port = int(os.getenv("PORT", "8080"))
-  # Off by default: reloading restarts the worker and wipes in-memory auction state
+  # Off by default for predictable production operation
   reload = os.getenv("RELOAD", "false").lower() in ("true", "1", "yes")
 
   uvicorn.run(

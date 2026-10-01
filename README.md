@@ -11,6 +11,7 @@ Designed to work seamlessly with the [cric-auction-frontend](https://github.com/
 - **Dynamic Configuration (`/api/set-config`):** Configure teams, budgets, purse amounts, image folders, and captains on the fly.
 - **Bidding Engine (`/api/bid`):** Real-time bidding with team budget deduction, duplicate-sale protection, and force-sell overrides (`ignore_budget`).
 - **Undo / Reverse Bid (`/api/reverse-bid`):** Roll back bids in LIFO order, automatically refunding the team's purse and returning the player to unsold status.
+- **Automatic Crash Recovery:** Durably journals config, bids, and reversals, then restores the auction in order on startup.
 - **Dynamic Image Serving (`/images/{filename}`):** Streams player photos dynamically from the user-configured image path, secured against path traversal attacks.
 - **Normalized Alphanumeric Player IDs:** Accepts standard string player IDs (e.g. `P101`, `EMP-42`, `C01`).
 - **Thread-Safe State:** Synchronized using `threading.RLock` to prevent race conditions across concurrent AnyIO worker threads.
@@ -60,6 +61,27 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
    ```bash
    uv run uvicorn cric_auction_backend.main:app --host 0.0.0.0 --port 8080 --reload
    ```
+
+### Recovery Journal
+
+Auction state is stored in `auction-state.jsonl` in the process working directory by
+default. Set `AUCTION_JOURNAL_PATH` to use a persistent location outside the checkout:
+
+```powershell
+$env:AUCTION_JOURNAL_PATH = "C:\cric-auction-data\auction-state.jsonl"
+uv run cric-auction-backend
+```
+
+For image serving, set `AUCTION_IMAGE_ROOT` to the trusted parent directory containing the
+configured player-photo directory. Image paths outside this root are rejected, and image
+requests are disabled until the root is configured.
+
+Each successful mutation is flushed to disk before the API acknowledges it. If persistence
+fails, the API returns `503` without changing the in-memory auction. A new `/api/set-config`
+atomically replaces the previous auction journal.
+
+Run one backend worker. The journal and in-memory lock coordinate threads within one process,
+not multiple Uvicorn worker processes.
 
 ---
 
@@ -149,6 +171,7 @@ cric-auction-backend/
 └── src/
     └── cric_auction_backend/
         ├── __init__.py
+        ├── journal.py          # Durable JSONL journal and startup replay
         ├── main.py             # FastAPI routes, CORS, and dynamic image proxy
         ├── models.py           # Pydantic schemas (Team, Bid, Config)
         └── state.py            # Thread-safe in-memory application state

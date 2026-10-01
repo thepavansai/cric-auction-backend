@@ -1,20 +1,56 @@
 import os
+import math
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from .journal import AuctionJournal, JournalError
 from .models import (
     AuctionConfig,
     BidHistory,
     BidRequest,
     BidResponse,
+    ReverseBidRequest,
     ReverseBidResponse,
     StatusResponse,
     Team,
 )
 from .state import state
 
-app = FastAPI()
+journal = AuctionJournal()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    journal.restore_into(state)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def _safe_validation_value(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _safe_validation_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_safe_validation_value(item) for item in value]
+    if isinstance(value, BaseException):
+        return str(value)
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(_request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _safe_validation_value(exc.errors())},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,28 +73,24 @@ def read_root():
 @app.post("/api/set-config", response_model=StatusResponse)
 def set_config(request: AuctionConfig):
     with state.lock:
-        state.teams.clear()
-        state.team_order.clear()
-        state.bid_history.clear()
-        state.image_path = ""
-
-        for index, team_name in enumerate(request.teams, start=1):
-            team_id = f"t{index}"
-
-            team = Team(
-                id=team_id,
-                name=team_name,
-                budget=request.base_purse,
-                roster=[],
-            )
-
-            state.teams[team_id] = team
-            state.team_order.append(team_id)
-
-        state.image_path = request.image_path
-        state.base_purse = request.base_purse
-        state.captain_ids = request.captain_ids
-        state.captain_names = request.captain_names
+        if request.image_path:
+            image_root_value = os.getenv("AUCTION_IMAGE_ROOT")
+            if image_root_value:
+                image_root = Path(image_root_value).resolve()
+                image_directory = Path(request.image_path).resolve()
+                if not image_directory.is_dir() or not image_directory.is_relative_to(image_root):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Image directory must exist under the configured image root",
+                    )
+        try:
+            journal.replace_config(request)
+        except JournalError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        state.configure(request)
 
     return StatusResponse(status="ok")
 
@@ -75,6 +107,22 @@ def get_teams():
 @app.post("/api/bid", response_model=BidResponse)
 def place_bid(request: BidRequest):
     with state.lock:
+        if request.request_id:
+            previous_request = state.bid_requests.get(request.request_id)
+            if previous_request:
+                fingerprint, response = previous_request
+                incoming_fingerprint = (
+                    request.team_id,
+                    request.player_id,
+                    request.bid_amount,
+                    request.ignore_budget,
+                )
+                if fingerprint != incoming_fingerprint:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Request ID was already used for a different bid",
+                    )
+                return response
 
         if not request.player_id.strip():
             raise HTTPException(status_code=400, detail="player_id is required")
@@ -106,27 +154,37 @@ def place_bid(request: BidRequest):
                 detail="Insufficient budget",
             )
 
-        # Re-round: repeated float arithmetic drifts (e.g. 100 - 2.1 - 2.2)
-        team.budget = round(team.budget - request.bid_amount, 1)
-        team.roster.append(request.player_id)
-
-        state.bid_history.append(
-            BidHistory(
-                team_id=request.team_id,
-                player_id=request.player_id,
-                bid_amount=request.bid_amount,
-            )
+        bid = BidHistory(
+            team_id=request.team_id,
+            player_id=request.player_id,
+            bid_amount=request.bid_amount,
         )
-
-        return BidResponse(
-            status="ok",
-            remaining_budget=team.budget,
-        )
+        try:
+            journal.append_bid(bid, request.request_id, request.ignore_budget)
+        except JournalError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        return state.apply_bid(bid, request.request_id, request.ignore_budget)
 
 
 @app.post("/api/reverse-bid", response_model=ReverseBidResponse)
-def reverse_bid():
+def reverse_bid(request: ReverseBidRequest | None = None):
     with state.lock:
+        request_id = request.request_id if request else None
+        expected_player_id = request.expected_player_id if request else None
+        if request_id:
+            previous_request = state.reverse_requests.get(request_id)
+            if previous_request:
+                previous_player_id, response = previous_request
+                if previous_player_id != expected_player_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Request ID was already used for a different reversal",
+                    )
+                return response
+
         if not state.bid_history:
             raise HTTPException(
                 status_code=409,
@@ -134,6 +192,11 @@ def reverse_bid():
             )
 
         last_bid = state.bid_history[-1]
+        if expected_player_id and expected_player_id != last_bid.player_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Latest bid changed; refresh before reversing",
+            )
         team = state.teams.get(last_bid.team_id)
 
         if team is None:
@@ -142,43 +205,38 @@ def reverse_bid():
                 detail="Team not found",
             )
 
-        if team.budget + last_bid.bid_amount < 0:
+        try:
+            journal.append_reverse(request_id)
+        except JournalError as exc:
             raise HTTPException(
-                status_code=409,
-                detail="Invalid bid reversal",
-            )
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        return state.apply_reverse(request_id)
 
-        team.budget = round(team.budget + last_bid.bid_amount, 1)
 
-        # Remove player from roster (pop last if matches, else linear remove)
-        if team.roster and team.roster[-1] == last_bid.player_id:
-            team.roster.pop()
-        elif last_bid.player_id in team.roster:
-            team.roster.remove(last_bid.player_id)
-
-        state.bid_history.pop()
-
-        return ReverseBidResponse(
-            status="ok",
-            team_id=last_bid.team_id,
-            player_id=last_bid.player_id,
-            bid_amount=last_bid.bid_amount,
-            remaining_budget=team.budget,
-        )
 @app.get("/images/{filename:path}")
-def get_image(filename:str):
+def get_image(filename: str):
     if not state.image_path:
         raise HTTPException(
             status_code=503,
             detail="Image directory isn't configured",
         )
-    safe_base = os.path.abspath(state.image_path)
-    target_path = os.path.abspath(os.path.join(safe_base,filename))
+    image_root_value = os.getenv("AUCTION_IMAGE_ROOT")
+    if not image_root_value:
+        raise HTTPException(status_code=503, detail="Image root is not configured")
 
-    if os.path.commonpath([safe_base, target_path]) != safe_base or ".." in filename:
+    image_root = Path(image_root_value).resolve()
+    safe_base = Path(state.image_path).resolve()
+    target_path = (safe_base / filename).resolve()
+    if (
+        not safe_base.is_relative_to(image_root)
+        or not target_path.is_relative_to(safe_base)
+        or target_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    ):
         raise HTTPException(status_code=400, detail="Invalid path")
 
-    if not os.path.isfile(target_path):
+    if not target_path.is_file():
         raise HTTPException(status_code=404, detail="Image not found")
 
     return FileResponse(target_path)

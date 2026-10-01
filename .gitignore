@@ -12,6 +12,7 @@ wheels/
 # Environment & local files
 .env
 *.log
+auction-state.jsonl
 
 # OS & Editor
 .DS_Store
