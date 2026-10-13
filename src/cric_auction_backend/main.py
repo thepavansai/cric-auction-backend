@@ -1,8 +1,11 @@
 import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from .journal import AuctionJournal, JournalError
 from .models import (
     AuctionConfig,
     BidHistory,
@@ -14,7 +17,16 @@ from .models import (
 )
 from .state import state
 
-app = FastAPI()
+journal = AuctionJournal()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    journal.restore_into(state)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,31 +49,14 @@ def read_root():
 @app.post("/api/set-config", response_model=StatusResponse)
 def set_config(request: AuctionConfig):
     with state.lock:
-        state.teams.clear()
-        state.team_order.clear()
-        state.bid_history.clear()
-        state.image_path = ""
-        state.expert_ids.clear()
-
-        for index, team_name in enumerate(request.teams, start=1):
-            team_id = f"t{index}"
-
-            team = Team(
-                id=team_id,
-                name=team_name,
-                budget=request.base_purse,
-                roster=[],
-            )
-
-            state.teams[team_id] = team
-            state.team_order.append(team_id)
-
-        state.image_path = request.image_path
-        state.base_purse = request.base_purse
-        state.max_experts_per_team = request.max_experts_per_team
-        state.expert_ids = set(request.expert_ids)
-        state.captain_ids = request.captain_ids
-        state.captain_names = request.captain_names
+        try:
+            journal.replace_config(request)
+        except JournalError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        state.configure(request)
 
     return StatusResponse(status="ok")
 
@@ -117,22 +112,19 @@ def place_bid(request: BidRequest):
                 detail="Insufficient budget",
             )
 
-        # Re-round: repeated float arithmetic drifts (e.g. 100 - 2.1 - 2.2)
-        team.budget = round(team.budget - request.bid_amount, 1)
-        team.roster.append(request.player_id)
-
-        state.bid_history.append(
-            BidHistory(
-                team_id=request.team_id,
-                player_id=request.player_id,
-                bid_amount=request.bid_amount,
-            )
+        bid = BidHistory(
+            team_id=request.team_id,
+            player_id=request.player_id,
+            bid_amount=request.bid_amount,
         )
-
-        return BidResponse(
-            status="ok",
-            remaining_budget=team.budget,
-        )
+        try:
+            journal.append_bid(bid)
+        except JournalError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        return state.apply_bid(bid)
 
 
 @app.post("/api/reverse-bid", response_model=ReverseBidResponse)
@@ -159,23 +151,14 @@ def reverse_bid():
                 detail="Invalid bid reversal",
             )
 
-        team.budget = round(team.budget + last_bid.bid_amount, 1)
-
-        # Remove player from roster (pop last if matches, else linear remove)
-        if team.roster and team.roster[-1] == last_bid.player_id:
-            team.roster.pop()
-        elif last_bid.player_id in team.roster:
-            team.roster.remove(last_bid.player_id)
-
-        state.bid_history.pop()
-
-        return ReverseBidResponse(
-            status="ok",
-            team_id=last_bid.team_id,
-            player_id=last_bid.player_id,
-            bid_amount=last_bid.bid_amount,
-            remaining_budget=team.budget,
-        )
+        try:
+            journal.append_reverse()
+        except JournalError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Auction state could not be persisted",
+            ) from exc
+        return state.apply_reverse()
 @app.get("/images/{filename:path}")
 def get_image(filename:str):
     if not state.image_path:
